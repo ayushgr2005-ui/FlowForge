@@ -1,0 +1,642 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>FlowForge Enterprise Dashboard</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 md:p-8">
+
+  <div class="max-w-6xl mx-auto space-y-6">
+
+    <!-- HEADER -->
+    <header class="border-b border-slate-800 pb-5 flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+
+      <div>
+        <h1 class="text-3xl font-extrabold tracking-tight text-cyan-400">
+          FlowForge Distributed Engine
+        </h1>
+
+        <p class="text-xs text-slate-400 mt-2">
+          Fault-Tolerant DAG Orchestration • Kafka Core •
+          Kahn's Topological Sort • Redis Lock
+        </p>
+      </div>
+
+      <div class="flex flex-col sm:flex-row gap-3">
+
+        <select
+          id="workflowSelect"
+          class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+          aria-label="Choose workflow">
+          <option value="">Loading workflows...</option>
+        </select>
+
+        <button
+          id="triggerBtn"
+          class="bg-cyan-600 hover:bg-cyan-500 disabled:cursor-not-allowed
+                 font-semibold px-6 py-2.5 rounded-lg shadow-lg
+                 shadow-cyan-900/50 transition">
+          Execute Pipeline
+        </button>
+
+      </div>
+    </header>
+
+    <!-- API CONNECTION STATUS -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center justify-between gap-3">
+
+      <div>
+        <p class="text-xs uppercase tracking-wider text-slate-500">
+          Backend Connection
+        </p>
+        <p id="apiStatus" class="text-sm font-semibold text-amber-400 mt-1">
+          Checking connection...
+        </p>
+      </div>
+
+      <button
+        id="refreshBtn"
+        class="text-sm bg-slate-800 hover:bg-slate-700 border
+               border-slate-700 rounded-lg px-4 py-2">
+        Refresh
+      </button>
+
+    </div>
+
+    <!-- EXECUTION METADATA AND JOBS -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+
+      <!-- EXECUTION METADATA -->
+      <div class="bg-slate-900 p-5 rounded-xl border border-slate-800 space-y-5">
+
+        <h2 class="text-sm font-bold uppercase tracking-wider text-slate-400">
+          Execution Metadata
+        </h2>
+
+        <div>
+          <div class="text-xs text-slate-500">RUN ID</div>
+          <div id="execId" class="font-mono text-cyan-400 font-bold text-lg mt-1">
+            None
+          </div>
+        </div>
+
+        <div>
+          <div class="text-xs text-slate-500">STATE</div>
+          <div id="execStatus" class="font-semibold text-slate-400 mt-1">
+            IDLE
+          </div>
+        </div>
+
+        <div>
+          <div class="text-xs text-slate-500">TOTAL JOBS</div>
+          <div id="totalJobs" class="font-bold text-xl mt-1">0</div>
+        </div>
+
+        <div>
+          <div class="text-xs text-slate-500">SUCCESSFUL JOBS</div>
+          <div id="successJobs" class="font-bold text-xl text-emerald-400 mt-1">
+            0
+          </div>
+        </div>
+
+        <div>
+          <div class="text-xs text-slate-500">FAILED JOBS</div>
+          <div id="failedJobs" class="font-bold text-xl text-rose-400 mt-1">
+            0
+          </div>
+        </div>
+
+      </div>
+
+      <!-- TOPOLOGY -->
+      <div class="md:col-span-3 bg-slate-900 p-5 rounded-xl border border-slate-800">
+
+        <div class="flex justify-between items-center gap-3 mb-4">
+
+          <h2 class="text-sm font-bold uppercase tracking-wider text-slate-400">
+            Topology Node Status
+          </h2>
+
+          <span class="text-xs text-slate-500">
+            Live execution monitor
+          </span>
+
+        </div>
+
+        <div id="nodesGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="text-sm text-slate-400">
+            Connecting to backend...
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ERROR / INFORMATION MESSAGE -->
+    <div
+      id="messageBox"
+      class="hidden rounded-xl border p-4 text-sm"
+      role="status"
+      aria-live="polite">
+    </div>
+
+    <!-- FOOTER -->
+    <footer class="border-t border-slate-800 pt-4 text-xs text-slate-500 flex flex-col sm:flex-row justify-between gap-2">
+      <span>FlowForge • Distributed Workflow &amp; Job Execution Engine</span>
+      <span>Backend API: localhost:8081</span>
+    </footer>
+
+  </div>
+
+  <script>
+    /*
+     * API CONFIGURATION
+     *
+     * The backend was previously verified on port 8081.
+     * If the frontend is served through a reverse proxy, this
+     * can instead be changed to an empty string.
+     */
+    const API_BASE = 'http://localhost:8081';
+
+    let selectedWorkflowId = null;
+    let pollInterval = null;
+    let isRunning = false;
+    let currentExecutionId = null;
+
+    const workflowSelect = document.getElementById('workflowSelect');
+    const triggerBtn = document.getElementById('triggerBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const nodesGrid = document.getElementById('nodesGrid');
+    const apiStatus = document.getElementById('apiStatus');
+    const messageBox = document.getElementById('messageBox');
+
+    // Display a message without inserting API text as HTML.
+    function showMessage(message, type = 'error') {
+      messageBox.classList.remove('hidden');
+
+      messageBox.className =
+        'rounded-xl border p-4 text-sm ' +
+        (type === 'success'
+          ? 'border-emerald-800 bg-emerald-950/40 text-emerald-300'
+          : type === 'info'
+          ? 'border-cyan-800 bg-cyan-950/40 text-cyan-300'
+          : 'border-rose-800 bg-rose-950/40 text-rose-300');
+
+      messageBox.textContent = message;
+    }
+
+    function hideMessage() {
+      messageBox.classList.add('hidden');
+      messageBox.textContent = '';
+    }
+
+    // Read and validate API responses.
+    async function apiFetch(path, options = {}) {
+      let response;
+
+      try {
+        response = await fetch(API_BASE + path, {
+          ...options,
+          headers: {
+            Accept: 'application/json',
+            ...(options.headers || {})
+          }
+        });
+      } catch (error) {
+        throw new Error(
+          'Cannot connect to backend. Check that the API is running at ' +
+          API_BASE + ' and that CORS allows this frontend origin.'
+        );
+      }
+
+      const responseText = await response.text();
+      let data = null;
+
+      if (responseText) {
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          throw new Error(
+            'The API returned a non-JSON response (HTTP ' +
+            response.status + '). Check the endpoint and server logs.'
+          );
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          (data && (data.message || data.error)) ||
+          'API request failed: HTTP ' + response.status
+        );
+      }
+
+      return data;
+    }
+
+    function setApiStatus(message, healthy = false) {
+      apiStatus.textContent = message;
+
+      apiStatus.className = healthy
+        ? 'text-sm font-semibold text-emerald-400 mt-1'
+        : 'text-sm font-semibold text-rose-400 mt-1';
+    }
+
+    function setExecutionStatus(status, color = 'text-slate-400') {
+      const element = document.getElementById('execStatus');
+      element.textContent = status;
+      element.className = 'font-semibold mt-1 ' + color;
+    }
+
+    function stopPolling() {
+      if (pollInterval !== null) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    }
+
+    function resetJobCards() {
+      document.querySelectorAll('[id^="node-"]').forEach(card => {
+        card.className =
+          'p-4 rounded-lg bg-slate-800/40 border border-slate-700';
+
+        const status = card.querySelector('.status');
+
+        if (status) {
+          status.textContent = 'IDLE';
+          status.className =
+            'status mt-2 text-xs font-semibold text-slate-500';
+        }
+
+        const context = card.querySelector('.context');
+
+        if (context) {
+          context.textContent = '';
+        }
+      });
+
+      document.getElementById('totalJobs').textContent =
+        document.querySelectorAll('[id^="node-"]').length;
+
+      document.getElementById('successJobs').textContent = '0';
+      document.getElementById('failedJobs').textContent = '0';
+    }
+
+    // Load workflows from the backend.
+    async function loadWorkflows() {
+      stopPolling();
+      hideMessage();
+
+      setApiStatus('Checking backend...', false);
+
+      workflowSelect.disabled = true;
+      triggerBtn.disabled = true;
+
+      try {
+        const workflows = await apiFetch('/api/workflows');
+
+        if (!Array.isArray(workflows)) {
+          throw new Error('Unexpected workflow response format.');
+        }
+
+        setApiStatus('Connected • Workflows API responding', true);
+
+        workflowSelect.innerHTML = '';
+
+        if (workflows.length === 0) {
+          selectedWorkflowId = null;
+
+          const option = document.createElement('option');
+          option.value = '';
+          option.textContent = 'No workflows available';
+          workflowSelect.appendChild(option);
+
+          nodesGrid.innerHTML = '';
+
+          const message = document.createElement('p');
+          message.className = 'text-sm text-slate-400';
+          message.textContent =
+            'No workflows found. Create one through the REST API first.';
+
+          nodesGrid.appendChild(message);
+
+          document.getElementById('totalJobs').textContent = '0';
+          triggerBtn.disabled = true;
+
+          showMessage('The backend is reachable, but it returned no workflows.', 'info');
+          return;
+        }
+
+        workflows.forEach(workflow => {
+          const option = document.createElement('option');
+          option.value = workflow.id;
+          option.textContent =
+            `${workflow.name || 'Workflow'} (#${workflow.id})`;
+
+          workflowSelect.appendChild(option);
+        });
+
+        workflowSelect.disabled = false;
+        selectedWorkflowId = workflowSelect.value;
+
+        await loadJobs(selectedWorkflowId);
+
+      } catch (error) {
+        selectedWorkflowId = null;
+
+        setApiStatus('Connection or API error', false);
+
+        workflowSelect.innerHTML = '';
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'Unable to load workflows';
+        workflowSelect.appendChild(option);
+
+        nodesGrid.innerHTML = '';
+
+        const errorText = document.createElement('p');
+        errorText.className = 'text-sm text-rose-400';
+        errorText.textContent = error.message;
+        nodesGrid.appendChild(errorText);
+
+        showMessage(error.message);
+        console.error('Workflow loading failed:', error);
+      }
+    }
+
+    // Load jobs for the selected workflow.
+    async function loadJobs(workflowId) {
+      if (!workflowId) return;
+
+      nodesGrid.innerHTML = '';
+
+      const loading = document.createElement('p');
+      loading.className = 'text-sm text-slate-400';
+      loading.textContent = 'Loading workflow jobs...';
+      nodesGrid.appendChild(loading);
+
+      const jobs = await apiFetch(
+        `/api/workflows/${encodeURIComponent(workflowId)}/jobs`
+      );
+
+      if (!Array.isArray(jobs)) {
+        throw new Error('Unexpected jobs response format.');
+      }
+
+      nodesGrid.innerHTML = '';
+
+      if (jobs.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'text-sm text-slate-400';
+        empty.textContent = 'This workflow does not have any jobs.';
+        nodesGrid.appendChild(empty);
+      }
+
+      jobs.forEach(job => {
+        const card = document.createElement('div');
+
+        card.id = `node-${job.id}`;
+        card.className =
+          'p-4 rounded-lg bg-slate-800/40 border border-slate-700';
+
+        const jobType = document.createElement('div');
+        jobType.className = 'text-xs text-slate-500 font-mono';
+        jobType.textContent =
+          `Job ${job.id} [${job.type || 'TASK'}]`;
+
+        const jobName = document.createElement('div');
+        jobName.className = 'font-bold text-slate-200 mt-1';
+        jobName.textContent = job.name || 'Unnamed job';
+
+        const status = document.createElement('div');
+        status.className =
+          'status mt-2 text-xs font-semibold text-slate-500';
+        status.textContent = 'IDLE';
+
+        const context = document.createElement('div');
+        context.className =
+          'context text-xs font-mono text-slate-400 mt-1 break-words';
+
+        card.appendChild(jobType);
+        card.appendChild(jobName);
+        card.appendChild(status);
+        card.appendChild(context);
+
+        nodesGrid.appendChild(card);
+      });
+
+      document.getElementById('totalJobs').textContent = jobs.length;
+      document.getElementById('successJobs').textContent = '0';
+      document.getElementById('failedJobs').textContent = '0';
+
+      triggerBtn.disabled = jobs.length === 0 || isRunning;
+    }
+
+    // Change workflow.
+    workflowSelect.addEventListener('change', async () => {
+      stopPolling();
+
+      currentExecutionId = null;
+      selectedWorkflowId = workflowSelect.value || null;
+
+      document.getElementById('execId').textContent = 'None';
+      setExecutionStatus('IDLE');
+      hideMessage();
+
+      if (!selectedWorkflowId) return;
+
+      triggerBtn.disabled = true;
+
+      try {
+        await loadJobs(selectedWorkflowId);
+      } catch (error) {
+        showMessage(error.message);
+        console.error('Loading jobs failed:', error);
+      }
+    });
+
+    // Trigger a workflow execution.
+    async function runPipeline() {
+      if (!selectedWorkflowId || isRunning) {
+        return;
+      }
+
+      hideMessage();
+      isRunning = true;
+
+      triggerBtn.disabled = true;
+      triggerBtn.classList.add('opacity-50');
+
+      stopPolling();
+      resetJobCards();
+
+      setExecutionStatus('TRIGGERING', 'text-amber-400');
+
+      try {
+        const result = await apiFetch(
+          `/api/executions/trigger/${encodeURIComponent(selectedWorkflowId)}`,
+          { method: 'POST' }
+        );
+
+        if (!result || result.executionId == null) {
+          throw new Error('The API did not return an execution ID.');
+        }
+
+        currentExecutionId = result.executionId;
+
+        document.getElementById('execId').textContent =
+          currentExecutionId;
+
+        setExecutionStatus(
+          result.status || 'TRIGGERED',
+          'text-cyan-400'
+        );
+
+        showMessage(
+          `Execution ${currentExecutionId} was triggered. Monitoring job status...`,
+          'success'
+        );
+
+        await poll(currentExecutionId);
+
+        if (isRunning && currentExecutionId !== null) {
+          pollInterval = setInterval(() => {
+            if (currentExecutionId !== null) {
+              poll(currentExecutionId);
+            }
+          }, 1500);
+        }
+
+      } catch (error) {
+        isRunning = false;
+
+        setExecutionStatus('ERROR', 'text-rose-400');
+        showMessage('Workflow trigger failed: ' + error.message);
+
+        console.error('Workflow trigger failed:', error);
+
+        triggerBtn.disabled = false;
+        triggerBtn.classList.remove('opacity-50');
+      }
+    }
+
+    // Poll the execution status endpoint.
+    async function poll(executionId) {
+      try {
+        const jobs = await apiFetch(
+          `/api/executions/${encodeURIComponent(executionId)}/status`
+        );
+
+        if (!Array.isArray(jobs)) {
+          throw new Error('Unexpected execution status response.');
+        }
+
+        let successCount = 0;
+        let failedCount = 0;
+        let runningCount = 0;
+        let readyCount = 0;
+
+        jobs.forEach(job => {
+          const card = document.getElementById(`node-${job.jobId}`);
+
+          if (!card) return;
+
+          const status = card.querySelector('.status');
+          const context = card.querySelector('.context');
+
+          status.textContent =
+            `${job.status} (Retries: ${job.retryCount ?? 0})`;
+
+          context.textContent = job.outputData
+            ? `Output: ${job.outputData}`
+            : '';
+
+          if (job.status === 'SUCCESS') {
+            successCount++;
+
+            card.className =
+              'p-4 rounded-lg bg-emerald-950/40 border border-emerald-500/50';
+
+            status.className =
+              'status mt-2 text-xs font-semibold text-emerald-400';
+
+          } else if (job.status === 'RUNNING') {
+            runningCount++;
+
+            card.className =
+              'p-4 rounded-lg bg-cyan-950/40 border border-cyan-500/50';
+
+            status.className =
+              'status mt-2 text-xs font-semibold text-cyan-400';
+
+          } else if (
+            job.status === 'FAILED' ||
+            job.status === 'DEAD_LETTER'
+          ) {
+            failedCount++;
+
+            card.className =
+              'p-4 rounded-lg bg-rose-950/40 border border-rose-500/50';
+
+            status.className =
+              'status mt-2 text-xs font-semibold text-rose-400';
+
+          } else {
+            readyCount++;
+          }
+        });
+
+        document.getElementById('totalJobs').textContent = jobs.length;
+        document.getElementById('successJobs').textContent = successCount;
+        document.getElementById('failedJobs').textContent = failedCount;
+
+        if (failedCount > 0) {
+          setExecutionStatus('FAILED', 'text-rose-400');
+          finishExecution();
+          showMessage(
+            'Execution finished with one or more failed jobs.'
+          );
+
+        } else if (jobs.length > 0 && successCount === jobs.length) {
+          setExecutionStatus('COMPLETED', 'text-emerald-400');
+          finishExecution();
+          showMessage(
+            `Execution ${executionId} completed successfully.`,
+            'success'
+          );
+
+        } else if (runningCount > 0 || readyCount > 0) {
+          setExecutionStatus('RUNNING', 'text-cyan-400');
+        }
+
+      } catch (error) {
+        console.error('Execution polling failed:', error);
+
+        // Keep polling for temporary errors, but report the problem.
+        showMessage('Could not refresh execution status: ' + error.message);
+      }
+    }
+
+    function finishExecution() {
+      stopPolling();
+      isRunning = false;
+
+      triggerBtn.disabled = !selectedWorkflowId;
+      triggerBtn.classList.remove('opacity-50');
+    }
+
+    // Button handlers.
+    triggerBtn.addEventListener('click', runPipeline);
+    refreshBtn.addEventListener('click', loadWorkflows);
+
+    // Initial page load.
+    loadWorkflows();
+  </script>
+
+</body>
+</html>
